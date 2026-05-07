@@ -22,7 +22,7 @@ BOSS_SLUGS = {
 }
 
 NAME_TO_SLUG = {
-    "ripindratruefrom": "ripindra",
+    "ripindratrueform": "ripindra",
     "ripindra":         "ripindra",
     "doughking":        "doughking",
     "cursedcaptain":    "cursedcaptain",
