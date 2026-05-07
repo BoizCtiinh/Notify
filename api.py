@@ -4,9 +4,8 @@ import threading
 import logging
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, field_validator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,7 +18,7 @@ MAX_AGE          = 200
 CLEANUP_INTERVAL = 5
 MAX_PER_BOSS     = 50
 
-BOSS_SLUGS: dict[str, str] = {
+BOSS_SLUGS = {
     "ripindra":      "rip_indra True Form",
     "doughking":     "Dough King",
     "cursedcaptain": "Cursed Captain",
@@ -28,7 +27,7 @@ BOSS_SLUGS: dict[str, str] = {
     "darkbeard":     "Darkbeard",
 }
 
-NAME_TO_SLUG: dict[str, str] = {
+NAME_TO_SLUG = {
     "ripindratruefrom": "ripindra",
     "ripindra":         "ripindra",
     "doughking":        "doughking",
@@ -39,8 +38,8 @@ NAME_TO_SLUG: dict[str, str] = {
     "darkbeard":        "darkbeard",
 }
 
-_store: dict[str, list] = {s: [] for s in BOSS_SLUGS}
-_last_update: dict[str, float] = {s: 0.0 for s in BOSS_SLUGS}
+_store = {s: [] for s in BOSS_SLUGS}
+_last_update = {s: 0.0 for s in BOSS_SLUGS}
 _lock = threading.Lock()
 
 
@@ -54,33 +53,37 @@ def _cleanup():
                 _store[slug] = [r for r in _store[slug] if now - r["posted_at"] <= MAX_AGE]
                 removed = before - len(_store[slug])
                 if removed:
-                    log.info("Removed {} expired entries ({})".format(removed, BOSS_SLUGS[slug]))
+                    log.info("Removed {} expired ({})".format(removed, BOSS_SLUGS[slug]))
 
 
 threading.Thread(target=_cleanup, daemon=True).start()
 
 
-class BossEntry(BaseModel):
-    boss_name:    str
-    player_count: str
-    job_id:       str
-
-    @field_validator("player_count")
-    @classmethod
-    def check_players(cls, v):
-        if not re.match(r"^\d{1,3}/\d{1,3}$", v):
-            raise ValueError("Format: x/y (e.g. 11/12)")
-        return v
-
-    @field_validator("job_id")
-    @classmethod
-    def check_job_id(cls, v):
-        if not re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", v):
-            raise ValueError("job_id must be a valid UUID")
-        return v.lower()
+UUID_RE    = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+PLAYERS_RE = re.compile(r"^\d{1,3}/\d{1,3}$")
 
 
-def build_response(slug: str) -> dict[str, Any]:
+def validate(body: dict) -> tuple[str, str, str, str]:
+    boss_name    = str(body.get("boss_name", "")).strip()
+    player_count = str(body.get("player_count", "")).strip()
+    job_id       = str(body.get("job_id", "")).strip().lower()
+
+    if not boss_name:
+        raise HTTPException(422, "boss_name is required")
+    if not PLAYERS_RE.match(player_count):
+        raise HTTPException(422, "player_count must be x/y (e.g. 11/12)")
+    if not UUID_RE.match(job_id):
+        raise HTTPException(422, "job_id must be a valid UUID")
+
+    key  = boss_name.lower().replace(" ", "").replace("_", "")
+    slug = NAME_TO_SLUG.get(key)
+    if not slug:
+        raise HTTPException(422, "Unknown boss: {}".format(boss_name))
+
+    return slug, BOSS_SLUGS[slug], player_count, job_id
+
+
+def build_response(slug: str) -> dict:
     now = time.time()
     with _lock:
         records  = list(_store[slug])
@@ -98,11 +101,7 @@ def build_response(slug: str) -> dict[str, Any]:
     ]
     data.sort(key=lambda x: x["Age"])
 
-    return {
-        "count":       len(data),
-        "data":        data,
-        "last_update": last_upd or now,
-    }
+    return {"count": len(data), "data": data, "last_update": last_upd or now}
 
 
 app = FastAPI(title="Boss Tracker API", version="2.0.0")
@@ -121,19 +120,12 @@ def root():
 
 
 @app.post("/api/boss", status_code=201)
-def post_boss(entry: BossEntry):
-    key  = entry.boss_name.lower().replace(" ", "").replace("_", "")
-    slug = NAME_TO_SLUG.get(key)
-    if not slug:
-        raise HTTPException(422, detail="Unknown boss: {}".format(entry.boss_name))
+async def post_boss(request: Request):
+    body = await request.json()
+    slug, name, players, job_id = validate(body)
 
     now = time.time()
-    record = {
-        "Name":      BOSS_SLUGS[slug],
-        "JobId":     entry.job_id,
-        "Players":   entry.player_count,
-        "posted_at": now,
-    }
+    record = {"Name": name, "JobId": job_id, "Players": players, "posted_at": now}
 
     with _lock:
         _store[slug].insert(0, record)
@@ -141,8 +133,8 @@ def post_boss(entry: BossEntry):
             _store[slug] = _store[slug][:MAX_PER_BOSS]
         _last_update[slug] = now
 
-    log.info("POST {} | {} | {}".format(record["Name"], record["Players"], record["JobId"]))
-    return {"success": True, "data": {"Age": 0, "JobId": record["JobId"], "Name": record["Name"], "Players": record["Players"]}, "last_update": now}
+    log.info("POST {} | {} | {}".format(name, players, job_id))
+    return {"success": True, "data": {"Age": 0, "JobId": job_id, "Name": name, "Players": players}, "last_update": now}
 
 
 @app.get("/api/boss/RipIndra")
